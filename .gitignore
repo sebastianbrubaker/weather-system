@@ -1,0 +1,12 @@
+# Git Ignore
+
+# Venv
+venv/
+
+# Testing and Logging
+*.log
+experimental.ipynb
+
+# Data
+*.db
+reports/
