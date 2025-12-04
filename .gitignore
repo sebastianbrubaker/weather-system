@@ -8,5 +8,5 @@ venv/
 experimental.ipynb
 
 # Data
-*.db
+data/
 reports/
