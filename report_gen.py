@@ -5,6 +5,41 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
+
+# -- Globals Constants ---
+
+WMO_CODES = {
+    0: 'Clear sky',
+    1: 'Mainly clear',
+    2: 'Partly cloudy',
+    3: 'Overcast',
+    45: 'Fog',
+    48: 'Depositing rime fog',
+    51: 'Light drizzle',
+    53: 'Moderate drizzle',
+    55: 'Dense drizzle',
+    56: 'Light freezing drizzle',
+    57: 'Dense freezing drizzle',
+    61: 'Light rain',
+    63: 'Moderate rain',
+    65: 'Heavy rain',
+    66: 'Light freezing rain',
+    67: 'Heavy freezing rain',
+    71: 'Light snowfall',
+    73: 'Moderate snowfall',
+    75: 'Heavy snowfall',
+    77: 'Snow grains',
+    80: 'Light rain showers',
+    81: 'Moderate rain showers',
+    82: 'Violent rain showers',
+    85: 'Light snow showers',
+    86: 'Heavy snow showers',
+    95: 'Thunderstorm',
+    96: 'Thunderstorm with slight hail',
+    99: 'Thunderstorm with heavy hail',
+}
+
+
 # --- Data Retrieval and Manipulation ---
 
 def fetch_weather_data(db_path: str, start_date: str, end_date: str, collected_cutoff: str):
@@ -71,33 +106,7 @@ def fetch_weather_data(db_path: str, start_date: str, end_date: str, collected_c
     return df
 
 
-def classify_precip(row) -> str:
-    """
-    Classifies precipiation occuring on a given day (row).
-
-    Parameters
-    ----------
-    row : pandas.core.series.Series
-        A row of a pd.DataFrame
-    
-    Returns
-    -------
-    str
-        A string listing each type of precipitation occuring
-        in the given row.
-    """
-    precip_type_lst = []
-
-    if row['rain_mm'] > 0:
-        precip_type_lst.append('Rain')
-    if row['showers_mm'] > 0:
-        precip_type_lst.append('Showers')
-    if row['snow_mm'] > 0:
-        precip_type_lst.append('Snow')
-    return '; '.join(precip_type_lst) if precip_type_lst else 'None'
-
-
-def format_weather_data_for_report(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def format_weather_data_for_report(df: pd.DataFrame, varif: bool = False) -> dict[str, pd.DataFrame]:
     """
     Take DB dateframe and convert it into a dictionary of formatted dataframes:
 
@@ -105,6 +114,9 @@ def format_weather_data_for_report(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     ----------
     df : pd.DataFrame
         Weather dataframe
+    varif : bool
+        If True area and collection date column will be incleded for manual inspection purposes.
+        False by default.
     
     Returns
     -------
@@ -117,8 +129,8 @@ def format_weather_data_for_report(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     if df.empty:
         return {}
 
-    # Add precip type
-    df['precipitation_type'] = df.apply(classify_precip, axis=1)
+    # Add weather code description
+    df['wmo_interpretation'] = df['weather_code'].map(WMO_CODES).fillna('None')
 
     # Format date for display
     df['date'] = pd.to_datetime(df['date'])
@@ -133,8 +145,13 @@ def format_weather_data_for_report(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
             'Low Temp (°C)': g['low_temp'].round(1),
             'Precip (%)': g['precipitation_percent'].round(1),
             'Precip (mm)': g['precipitation_mm'].round(1),
-            'Precip Type(s)': g['precipitation_type'],
+            'Conditions': g['wmo_interpretation'],
         })
+
+        if varif:
+            formatted['Col Date'] = g['collection_date']
+            formatted['Area'] = g['area']
+
         area_dict[area_name] = formatted.reset_index(drop=True)
 
     return area_dict
@@ -143,7 +160,8 @@ def format_weather_data_for_report(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 # --- PDF Report Generation ---
 
 def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
-                    date_range: str, notes_str: str, out_f_p: str,
+                    date_range: str, prepared_for_str: str, summary_str: str,
+                    notes_str: str, out_f_p: str,
                     ) -> None:
     """
     Generate a multi-page PDF weather report with one page per area.
@@ -157,8 +175,12 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
         Title displayed at the top of the report.
     date_range : str
         Human-readable date range shown below the title.
-    notes_str : str
+    prepared_for_str : str
+        Client name shown below title.
+    summary_str : str
         Short summary string included in the "At a glance" section.
+    notes_str : str
+        Additional notes on the report.
     out_f_p : str
         File path for the output PDF.
 
@@ -170,13 +192,14 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
 
     content = []
 
+    # Define styles
     styles = getSampleStyleSheet()
     style_normal = styles['Normal']
     style_heading = styles['Heading1']
+    style_heading.fontSize = 16
 
-    # Define styles
     style_title = styles['Heading1'].clone('TitleStyle')  # Clone the existing Heading1 style
-    style_title.fontSize = 14  # Set a smaller font size
+    style_title.fontSize = 20  # Set a smaller font size
     style_title.alignment = 1   # Center alignment
 
     style_dates = styles['Normal'].clone('DateStyle')  # Clone the existing Heading2 style
@@ -194,13 +217,19 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
     ])
 
     title = Paragraph(report_title, style_title)
-    date_text = Paragraph(f'{date_range}', style_dates)
+    date_text = Paragraph(f'<u>{date_range}</u>', style_dates)
+    prepared_for = Paragraph(prepared_for_str, style_dates)
+    summary = Paragraph(
+        f'<br/><b>At a glance:</b> {summary_str} <br/>',
+        style_normal,
+    )
     notes = Paragraph(
-        f'<br/><b>At a glance:</b> {notes_str} <br/>',
+        f'<br/><b>Notes:</b> {notes_str} <br/>',
         style_normal,
     )
 
-    content.extend([title, date_text, notes, Spacer(1, 24)])
+    content.extend([title, date_text, Spacer(1, 12), prepared_for, Spacer(1, 24),
+                    summary, notes, Spacer(1, 28)])
 
     first = True # Bool flag for page breaks 
     for area_name, df in area_df_dict.items():
@@ -210,7 +239,7 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
         first = False
 
         content.append(Paragraph(text=f'{area_name}', style=style_heading))
-        content.append(Spacer(1, 12))
+        # content.append(Spacer(1, 1))
 
         # Convert the DataFrame into a list-of-lists (ReportLab table format)
         table_data = [df.columns.tolist()] + df.values.tolist()
@@ -225,7 +254,7 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
         for row_idx in range(1, len(table_data)):  # skip header
             low_temp = table_data[row_idx][2]      # Low Temp (°C) at column index 2
 
-            if low_temp <= 0:
+            if low_temp <= 1:
                 color = colors.lightcoral
             elif low_temp <= 2.5:
                 color = colors.lightgoldenrodyellow
@@ -243,7 +272,7 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
                 )
 
         table.setStyle(t_style)
-        content.append(KeepTogether([table, Spacer(1, 14)]))
+        content.append(KeepTogether([table, Spacer(1, 8)]))
 
     doc.build(content)
     print(f'PDF report at: {out_f_p}')
@@ -251,19 +280,21 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
 
 def main():
     db_path = 'data/weather.db'
-    start_date = '2025-12-02'
-    end_date='2025-12-18'
-    collected_cutoff='2025-12-02'
+    start_date = '2025-12-07'
+    end_date='2025-12-22'
+    collected_cutoff='2025-12-06'
 
     report_title = 'Weather Forecast for CRD, BC, Canada'
-    date_range = 'Mon Dec 8 - Sun Dec 21'
-    weather_notes = 'Weather notes here...'
+    prepared_for_str = 'Prepared for Avenue Road Property Maintenance'
+    date_range = 'Sun Dec 7 - Mon Dec 22'
+    summary_str = 'Sub 4°C daily lows setting in around Dec 18 | CRD-wide snowfall predicted on Dec 21.'
+    notes_str = 'Conditional formatting as follows:  temp ≤ 4: blue,  temp ≤ 2.5: yellow,  temp ≤ 1: red'
 
-    report_f_p = 'reports/sample_report.pdf'
+    report_f_p = 'reports/weather_report2025-12-07_2025-12-22.pdf'
 
     df = fetch_weather_data(db_path, start_date, end_date, collected_cutoff)
     area_df_dict = format_weather_data_for_report(df)
-    generate_report(area_df_dict, report_title, date_range, weather_notes, report_f_p)
+    generate_report(area_df_dict, report_title, date_range, prepared_for_str, summary_str, notes_str, report_f_p)
 
 
 if __name__ == '__main__':
