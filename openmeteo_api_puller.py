@@ -28,7 +28,9 @@ LOCATIONS = {
 os.makedirs('data', exist_ok=True)
 DB_PATH = 'data/weather.db'
 
-# --- API call and data formatting --- 
+
+# --- API call and data formatting ---
+ 
 def openmeteo_api_call(locations: dict[str, tuple[float, float]]) -> pd.DataFrame:
     """
     Docstring for api_call

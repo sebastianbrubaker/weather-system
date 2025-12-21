@@ -144,8 +144,9 @@ def format_weather_data_for_report(df: pd.DataFrame, varif: bool = False) -> dic
             'High Temp (°C)': g['high_temp'].round(1),
             'Low Temp (°C)': g['low_temp'].round(1),
             'Precip (%)': g['precipitation_percent'].round(1),
+            'Snow (mm)': g['snow_mm'].round(1),
             'Precip (mm)': g['precipitation_mm'].round(1),
-            'Conditions': g['wmo_interpretation'],
+            # 'Conditions': g['wmo_interpretation'], 
         })
 
         if varif:
@@ -251,25 +252,25 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
         t_style = TableStyle(table_style.getCommands())
 
         # Color code cells by temperature
-        for row_idx in range(1, len(table_data)):  # skip header
-            low_temp = table_data[row_idx][2]      # Low Temp (°C) at column index 2
+        for col_idx in range(1,3): # Iterate columns
+            for row_idx in range(1, len(table_data)):  # Iterate rows and skip header 
+                temp = table_data[row_idx][col_idx]
 
-            if low_temp <= 1:
-                color = colors.lightcoral
-            elif low_temp <= 2.5:
-                color = colors.lightgoldenrodyellow
-            elif low_temp <= 4:
-                color = colors.lightblue
-            else:
-                color = None
+                if temp <= 1:
+                    color = colors.lightcoral
+                elif temp <= 2.5:
+                    color = colors.lightgoldenrodyellow
+                elif temp <= 4:
+                    color = colors.lightblue
+                else:
+                    color = None
 
-            if color:
-                # Column index 2 corresponds to “Low Temp (°C)”
-                t_style.add(
-                    'BACKGROUND',
-                    (2, row_idx), (2, row_idx),
-                    color
-                )
+                if color:
+                    t_style.add(
+                        'BACKGROUND',
+                        (col_idx, row_idx), (col_idx, row_idx),
+                        color
+                    )
 
         table.setStyle(t_style)
         content.append(KeepTogether([table, Spacer(1, 8)]))
@@ -280,20 +281,20 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
 
 def main():
     db_path = 'data/weather.db'
-    start_date = '2025-12-07'
-    end_date='2025-12-22'
-    collected_cutoff='2025-12-06'
+    start_date = '2025-12-21'
+    end_date='2026-01-20'
+    collected_cutoff='2025-12-20'
 
     report_title = 'Weather Forecast for CRD, BC, Canada'
-    prepared_for_str = 'Prepared for Avenue Road Property Maintenance'
-    date_range = 'Sun Dec 7 - Mon Dec 22'
-    summary_str = 'Sub 4°C daily lows setting in around Dec 18 | CRD-wide snowfall predicted on Dec 21.'
-    notes_str = 'Conditional formatting as follows:  temp ≤ 4: blue,  temp ≤ 2.5: yellow,  temp ≤ 1: red'
+    prepared_for_str = 'Prepared for: Avenue Road Property Maintenance'
+    date_range = 'None'
+    summary_str = 'None'
+    notes_str = 'Conditional formatting:  temp ≤ 4: blue,  temp ≤ 2.5: yellow,  temp ≤ 1: red.'
 
-    report_f_p = 'reports/weather_report2025-12-07_2025-12-22.pdf'
+    report_f_p = 'reports/weather_report_.pdf'
 
     df = fetch_weather_data(db_path, start_date, end_date, collected_cutoff)
-    area_df_dict = format_weather_data_for_report(df)
+    area_df_dict = format_weather_data_for_report(df, varif=False)
     generate_report(area_df_dict, report_title, date_range, prepared_for_str, summary_str, notes_str, report_f_p)
 
 
