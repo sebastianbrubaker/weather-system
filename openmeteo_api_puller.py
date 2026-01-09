@@ -14,6 +14,7 @@ import openmeteo_requests
 import requests_cache
 from retry_requests import retry
 
+
 # --- Globals ---
 LOCATIONS = {
     'Victoria': (48.4284, -123.3656), 'Oak Bay': (48.4237, -123.3172),
@@ -70,6 +71,7 @@ def openmeteo_api_call(locations: dict[str, tuple[float, float]]) -> pd.DataFram
         params['latitude'] = lat
         params['longitude'] = lon
 
+        print(f'Fetching data for {area_name}...')
         try:
             responses = openmeteo.weather_api(url, params=params)
             daily = responses[0].Daily()
@@ -100,6 +102,8 @@ def openmeteo_api_call(locations: dict[str, tuple[float, float]]) -> pd.DataFram
         })
 
         df_list.append(df)
+
+        print(f'✓ Completed {area_name}')
     
     return pd.concat(df_list, ignore_index=True)
 

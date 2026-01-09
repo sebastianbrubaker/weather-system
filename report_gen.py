@@ -220,18 +220,26 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
     title = Paragraph(report_title, style_title)
     date_text = Paragraph(f'<u>{date_range}</u>', style_dates)
     prepared_for = Paragraph(prepared_for_str, style_dates)
-    summary = Paragraph(
-        f'<br/><b>At a glance:</b> {summary_str} <br/>',
-        style_normal,
-    )
-    notes = Paragraph(
-        f'<br/><b>Notes:</b> {notes_str} <br/>',
-        style_normal,
-    )
 
-    content.extend([title, date_text, Spacer(1, 12), prepared_for, Spacer(1, 24),
-                    summary, notes, Spacer(1, 28)])
+    content.extend([title, date_text, Spacer(1, 12), prepared_for, Spacer(1, 24)])
 
+    if not summary_str is None:
+        summary = Paragraph(
+            f'<br/><b>At a glance:</b> {summary_str} <br/>',
+            style_normal,
+        )
+        content.extend([summary])
+    
+    if not notes_str is None:        
+        notes = Paragraph(
+            f'<br/><b>Notes:</b> {notes_str} <br/>',
+            style_normal,
+        )
+        content.extend([notes])
+
+    content.extend([Spacer(1, 28)])
+
+    
     first = True # Bool flag for page breaks 
     for area_name, df in area_df_dict.items():
         
@@ -281,17 +289,17 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
 
 def main():
     db_path = 'data/weather.db'
-    start_date = '2025-12-21'
-    end_date='2026-01-20'
-    collected_cutoff='2025-12-20'
+    start_date = '2026-01-09'
+    end_date='2026-01-23'
+    collected_cutoff='2026-01-08'
 
     report_title = 'Weather Forecast for CRD, BC, Canada'
     prepared_for_str = 'Prepared for: Avenue Road Property Maintenance'
-    date_range = 'None'
-    summary_str = 'None'
+    date_range = 'Jan 09 - Jan 23'
+    summary_str = None
     notes_str = 'Conditional formatting:  temp ≤ 4: blue,  temp ≤ 2.5: yellow,  temp ≤ 1: red.'
 
-    report_f_p = 'reports/weather_report_.pdf'
+    report_f_p = 'reports/weather_report_2026-01-09_2026-01-23.pdf'
 
     df = fetch_weather_data(db_path, start_date, end_date, collected_cutoff)
     area_df_dict = format_weather_data_for_report(df, varif=False)
