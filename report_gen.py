@@ -1,9 +1,13 @@
 import sqlite3
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from pathlib import Path
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether, PageBreak
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Image
 
 
 # -- Globals Constants ---
@@ -42,7 +46,7 @@ WMO_CODES = {
 
 # --- Data Retrieval and Manipulation ---
 
-def fetch_weather_data(db_path: str, start_date: str, end_date: str, collected_cutoff: str):
+def fetch_daily_weather_data(db_path: str, start_date: str, end_date: str, collected_cutoff: str) -> pd.DataFrame:
     """
     Fetch the latest collected weather data for each (date, area) within a date range.
 
@@ -78,11 +82,11 @@ def fetch_weather_data(db_path: str, start_date: str, end_date: str, collected_c
     # 3. Pick the most recent collection_date for each (date, area)
     query = """
     SELECT *
-    FROM openmeteo AS om
+    FROM openmeteo_daily AS om
     WHERE om.date BETWEEN ? AND ?
       AND om.collection_date = (
             SELECT MAX(collection_date)
-            FROM openmeteo AS sub
+            FROM openmeteo_daily AS sub
             WHERE sub.date = om.date
               AND sub.area = om.area
               AND sub.collection_date > ?
@@ -104,6 +108,61 @@ def fetch_weather_data(db_path: str, start_date: str, end_date: str, collected_c
         df["collection_date"] = pd.to_datetime(df["collection_date"])
 
     return df
+
+
+def fetch_hourly_weather_data(
+    db_path: str,
+    start_date: str,
+    end_date: str,
+    collected_cutoff: str
+) -> pd.DataFrame:
+    """
+    Fetch latest collected hourly weather data per (date, hour, area).
+    """
+
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error as e:
+        print(f"Failed to connect to DB: {e}")
+        return pd.DataFrame()
+
+    query = """
+    SELECT *
+    FROM openmeteo_hourly AS oh
+    WHERE oh.date BETWEEN ? AND ?
+      AND oh.collection_date = (
+            SELECT MAX(collection_date)
+            FROM openmeteo_hourly AS sub
+            WHERE sub.date = oh.date
+              AND sub.area = oh.area
+              AND sub.collection_date > ?
+      )
+    ORDER BY area, date;
+    """
+
+    df = pd.read_sql_query(
+        query,
+        conn,
+        params=(start_date, end_date, collected_cutoff)
+    )
+
+    conn.close()
+
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+        df["collection_date"] = pd.to_datetime(df["collection_date"])
+
+    return df
+
+
+def split_hourly_by_area(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if df.empty:
+        return {}
+
+    return {
+        area: g.reset_index(drop=True)
+        for area, g in df.groupby("area")
+    }
 
 
 def format_weather_data_for_report(df: pd.DataFrame, varif: bool = False) -> dict[str, pd.DataFrame]:
@@ -160,9 +219,69 @@ def format_weather_data_for_report(df: pd.DataFrame, varif: bool = False) -> dic
 
 # --- PDF Report Generation ---
 
-def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
-                    date_range: str, prepared_for_str: str, summary_str: str,
-                    notes_str: str, out_f_p: str,
+def generate_temp_dewpoint_figure(df_area: pd.DataFrame, area_name: str, out_dir: str) -> str:
+    """
+    Generate temperature vs dewpoint figure for a single area
+    and save it as a PNG.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # You may need to adjust column names here to match your DB
+    hours = pd.to_datetime(df_area['date'])
+    temperatures = df_area['temperature_2m']
+    dewpoints = df_area['dewpoint_2m']
+
+    fig, ax = plt.subplots(figsize=(20, 10))
+
+    ax.plot(hours, temperatures, label='Air Temp')
+    ax.plot(hours, dewpoints, label='Dew Point', linestyle='--')
+
+    ax.fill_between(
+        hours,
+        dewpoints,
+        temperatures,
+        where=(temperatures >= dewpoints),
+        alpha=0.15,
+        interpolate=True
+    )
+
+    close_mask = (temperatures - dewpoints) <= 2
+    ax.scatter(
+        hours[close_mask],
+        dewpoints[close_mask],
+        s=15,
+        label='Near saturation (≤2°C spread)'
+    )
+
+    ax.axhline(0, linewidth=0.8, linestyle='--', label='Freezing')
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d %I %p'))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+    plt.xticks(rotation=45)
+
+    ax.grid(True, axis='x', linestyle='--', alpha=0.5)
+    ax.legend()
+    ax.set_title(f'Temperature vs Dew Point – {area_name}')
+
+    plt.tight_layout()
+
+    img_path = out_dir / f"{area_name}_temp_dewpoint.png"
+    plt.savefig(img_path, dpi=150)
+    plt.close(fig)
+
+    return str(img_path)
+
+
+def generate_report(area_df_dict: dict[str, pd.DataFrame],
+                    hourly_area_dict: dict[str, pd.DataFrame],
+                    report_title: str,
+                    date_range: str, 
+                    prepared_for_str: str,
+                    summary_str: str,
+                    notes_str: str,
+                    sources_str: str,
+                    out_f_p: str,
                     ) -> None:
     """
     Generate a multi-page PDF weather report with one page per area.
@@ -283,27 +402,76 @@ def generate_report(area_df_dict: dict[str, pd.DataFrame], report_title: str,
         table.setStyle(t_style)
         content.append(KeepTogether([table, Spacer(1, 8)]))
 
+        # Figure page
+        content.append(PageBreak())
+
+        hourly_df = hourly_area_dict.get(area_name)
+
+        if hourly_df is not None and not hourly_df.empty:
+            fig_path = generate_temp_dewpoint_figure(
+                df_area=hourly_df,
+                area_name=area_name,
+                out_dir='reports/figures'
+            )
+
+            img = Image(fig_path, width=500, height=250)
+            img.hAlign = 'CENTER'
+
+            content.append(Spacer(1, 12))
+            content.append(img)
+        else:
+            content.append(Paragraph(
+                f'No hourly data available for {area_name}.',
+                style_normal
+            ))
+
+    content.append(PageBreak())
+
+    if not sources_str is None:        
+        sources = Paragraph(
+            f'<br/><b>Sources:</b> {sources_str} <br/>',
+            style_normal,
+        )
+        content.append(sources)
+
     doc.build(content)
     print(f'PDF report at: {out_f_p}')
 
 
 def main():
     db_path = 'data/weather.db'
-    start_date = '2026-01-09'
-    end_date='2026-01-23'
-    collected_cutoff='2026-01-08'
+    start_date = '2026-01-27'
+    end_date='2026-02-31'
+    collected_cutoff='2026-01-26'
 
     report_title = 'Weather Forecast for CRD, BC, Canada'
-    prepared_for_str = 'Prepared for: Avenue Road Property Maintenance'
-    date_range = 'Jan 09 - Jan 23'
+    prepared_for_str = ''
+    date_range = 'Jan 27 - Feb '
     summary_str = None
     notes_str = 'Conditional formatting:  temp ≤ 4: blue,  temp ≤ 2.5: yellow,  temp ≤ 1: red.'
+    sources_str = 'Open-Meteo: Deutscher Wetterdienst (DWD), NOAA, Météo-France, ECMWF, UK Met Office, KMA Korea,' \
+                'JMA, MeteoSwiss, MET Norway, Canadian Weather Service, Australian Bureau of Meteorology (BOM), ' \
+                'China Meteorological Administration (CMA), KNMI, DMI, ItaliaMeteo.'
 
-    report_f_p = 'reports/weather_report_2026-01-09_2026-01-23.pdf'
+    report_f_p = 'reports/weather_report_2026-01-27_2026-02.pdf'
 
-    df = fetch_weather_data(db_path, start_date, end_date, collected_cutoff)
-    area_df_dict = format_weather_data_for_report(df, varif=False)
-    generate_report(area_df_dict, report_title, date_range, prepared_for_str, summary_str, notes_str, report_f_p)
+    df_daily = fetch_daily_weather_data(db_path, start_date, end_date, collected_cutoff)
+    area_df_dict = format_weather_data_for_report(df_daily, varif=False)
+
+    # Hourly data
+    hourly_df = fetch_hourly_weather_data(db_path, start_date, end_date, collected_cutoff)
+    hourly_area_dict = split_hourly_by_area(hourly_df)
+
+    generate_report(area_df_dict, 
+                    hourly_area_dict,
+                    report_title, 
+                    date_range,
+                    prepared_for_str, 
+                    summary_str, 
+                    notes_str,
+                    sources_str, 
+                    report_f_p,
+                    )
 
 
 if __name__ == '__main__':

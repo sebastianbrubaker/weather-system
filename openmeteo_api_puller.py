@@ -32,7 +32,7 @@ DB_PATH = 'data/weather.db'
 
 # --- API call and data formatting ---
  
-def openmeteo_api_call(locations: dict[str, tuple[float, float]]) -> pd.DataFrame:
+def openmeteo_api_daily(locations: dict[str, tuple[float, float]]) -> pd.DataFrame:
     """
     Docstring for api_call
     
@@ -71,7 +71,7 @@ def openmeteo_api_call(locations: dict[str, tuple[float, float]]) -> pd.DataFram
         params['latitude'] = lat
         params['longitude'] = lon
 
-        print(f'Fetching data for {area_name}...')
+        print(f'Fetching daily data for {area_name}...')
         try:
             responses = openmeteo.weather_api(url, params=params)
             daily = responses[0].Daily()
@@ -108,34 +108,95 @@ def openmeteo_api_call(locations: dict[str, tuple[float, float]]) -> pd.DataFram
     return pd.concat(df_list, ignore_index=True)
 
 
-# --- Database Operations ---
-def df_to_db(df: pd.DataFrame, db_path: str) -> None:
+def openmeteo_api_hourly(locations: dict[str, tuple[float, float]]) -> pd.DataFrame:
     """
-    Insert weather DataFrame into SQLite database with UPSERT logic.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Combined weather DataFrame for all locations.
-    db_path : str
-        Path to SQLite database.
+    Docstring for api_call
+    
+    :return: Description
+    :rtype: DataFrame
     """
     # Default to global
-    if db_path is None:
-        db_path = DB_PATH
+    if locations is None:
+        locations = LOCATIONS
+
+    # Setup caching & retry
+    cach_path = 'data/api_cache'
+    cache_session = requests_cache.CachedSession(cach_path, expire_after=3600) # Fresh for an hour
+    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
+    openmeteo = openmeteo_requests.Client(session=retry_session)
+
+    # Weather API params
+    url = 'https://api.open-meteo.com/v1/forecast'
+    params = {
+        'hourly': ['temperature_2m', 'dew_point_2m'],
+        'timezone': 'America/Los_Angeles',
+        'past_days': 1,
+        'forecast_days': 16,
+    }
+
+    collection_date = datetime.now()
+
+    df_list = []
+
+    # Loop through each area
+    for area_name, (lat, lon) in locations.items():
+        params['latitude'] = lat
+        params['longitude'] = lon
+
+        print(f'Fetching hourly data for {area_name}...')
+        try:
+            responses = openmeteo.weather_api(url, params=params)
+            hourly = responses[0].Hourly() 
+        except Exception as e:
+            print(f'API pull failed for {area_name}: {e}')
+            continue
+
+        # Build dataframe
+        df = pd.DataFrame({
+            'date': pd.date_range(
+                start=pd.to_datetime(hourly.Time(), unit='s', utc=True),
+                end=pd.to_datetime(hourly.TimeEnd(), unit='s', utc=True),
+                freq=pd.Timedelta(seconds=hourly.Interval()),
+                inclusive='left'
+            ).tz_localize(None).strftime('%Y-%m-%d-%H'),
+            'area': area_name,
+            'temperature_2m': hourly.Variables(0).ValuesAsNumpy(),
+            'dewpoint_2m': hourly.Variables(1).ValuesAsNumpy(),
+            'lat': lat,
+            'lon': lon,
+            'collection_date': collection_date.strftime('%Y-%m-%d-%H'),
+        })
+
+        df_list.append(df)
+
+        print(f'✓ Completed {area_name}')
+    
+    return pd.concat(df_list, ignore_index=True)
+
+
+# --- Database Operations ---
+
+def df_to_db(df: pd.DataFrame, table: str, db_path: str = DB_PATH) -> None:
+    """
+    Docstring for df_to_db
+    
+    :param df: Description
+    :type df: pd.DataFrame
+    :param table: Description
+    :type table: str
+    :param db_path: Description
+    :type db_path: str
+    """
+    if table not in {'openmeteo_daily', 'openmeteo_hourly'}:
+        raise ValueError(f'Unknown table: {table}')
 
     try:
         conn = sqlite3.connect(db_path)
-    except sqlite3.Error as e:
-        print(f'Failed to connect to DB: {db_path}: {e}')
-        return
-    
-    cursor = conn.cursor()
+        cursor = conn.cursor()
 
-    try:
-        # Create table if not exists
+        # --- Table creation ---
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS openmeteo (
+            CREATE TABLE IF NOT EXISTS openmeteo_daily (
                 date TEXT,
                 area TEXT,
                 lat REAL,
@@ -153,43 +214,81 @@ def df_to_db(df: pd.DataFrame, db_path: str) -> None:
             )
         """)
 
-        # Prepare UPSERT insert
-        insert_query = """
-            INSERT INTO openmeteo (
-                date, area, lat, lon,
-                weather_code, high_temp, low_temp,
-                rain_mm, snow_mm, showers_mm,
-                precipitation_mm, precipitation_percent,
-                collection_date
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS openmeteo_hourly (
+                date TEXT,
+                area TEXT,
+                lat REAL,
+                lon REAL,
+                temperature_2m REAL,
+                dewpoint_2m REAL,
+                collection_date TEXT,
+                PRIMARY KEY (date, area)
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(date, area) DO UPDATE SET
-                lat=excluded.lat,
-                lon=excluded.lon,
-                weather_code=excluded.weather_code,
-                high_temp=excluded.high_temp,
-                low_temp=excluded.low_temp,
-                rain_mm=excluded.rain_mm,
-                snow_mm=excluded.snow_mm,
-                showers_mm=excluded.showers_mm,
-                precipitation_mm=excluded.precipitation_mm,
-                precipitation_percent=excluded.precipitation_percent,
-                collection_date=excluded.collection_date;
-        """
+        """)
 
-        # Explicit column ordering
-        cols = [
-        'date', 'area', 'lat', 'lon',
-        'weather_code', 'high_temp', 'low_temp',
-        'rain_mm', 'snow_mm', 'showers_mm',
-        'precipitation_mm', 'precipitation_percent',
-        'collection_date',
-        ]
+        # --- Table-specific inserts ---
+        if table == 'openmeteo_daily':
+            insert_query = """
+                INSERT INTO openmeteo_daily (
+                    date, area, lat, lon,
+                    weather_code, high_temp, low_temp,
+                    rain_mm, snow_mm, showers_mm,
+                    precipitation_mm, precipitation_percent,
+                    collection_date
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date, area) DO UPDATE SET
+                    lat=excluded.lat,
+                    lon=excluded.lon,
+                    weather_code=excluded.weather_code,
+                    high_temp=excluded.high_temp,
+                    low_temp=excluded.low_temp,
+                    rain_mm=excluded.rain_mm,
+                    snow_mm=excluded.snow_mm,
+                    showers_mm=excluded.showers_mm,
+                    precipitation_mm=excluded.precipitation_mm,
+                    precipitation_percent=excluded.precipitation_percent,
+                    collection_date=excluded.collection_date;
+            """
 
-        cursor.executemany(insert_query, df[cols].itertuples(index=False, name=None))
+            cols = [
+                'date', 'area', 'lat', 'lon',
+                'weather_code', 'high_temp', 'low_temp',
+                'rain_mm', 'snow_mm', 'showers_mm',
+                'precipitation_mm', 'precipitation_percent',
+                'collection_date',
+            ]
+
+        else:  # openmeteo_hourly
+            insert_query = """
+                INSERT INTO openmeteo_hourly (
+                    date, area, lat, lon,
+                    temperature_2m, dewpoint_2m,
+                    collection_date
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date, area) DO UPDATE SET
+                    lat=excluded.lat,
+                    lon=excluded.lon,
+                    temperature_2m=excluded.temperature_2m,
+                    dewpoint_2m=excluded.dewpoint_2m,
+                    collection_date=excluded.collection_date;
+            """
+
+            cols = [
+                'date', 'area', 'lat', 'lon',
+                'temperature_2m', 'dewpoint_2m',
+                'collection_date',
+            ]
+
+        cursor.executemany(
+            insert_query,
+            df[cols].itertuples(index=False, name=None)
+        )
 
         conn.commit()
-        print(f'Successfully inserted {len(df)} rows into DB.')
+        print(f'Successfully inserted {len(df)} rows into {table}.')
 
     except sqlite3.Error as e:
         print(f'Database operation failed: {e}')
@@ -200,8 +299,12 @@ def df_to_db(df: pd.DataFrame, db_path: str) -> None:
 
 def main():
     try:
-        df = openmeteo_api_call(locations=LOCATIONS)
-        df_to_db(df, db_path=DB_PATH)
+        df_daily = openmeteo_api_daily(locations=LOCATIONS)
+        df_to_db(df_daily, table='openmeteo_daily')
+
+        df_hourly = openmeteo_api_hourly(locations=LOCATIONS)
+        df_to_db(df_hourly, table='openmeteo_hourly')
+
     except Exception as e:
         print(e)
 
